@@ -83,6 +83,7 @@ func (b *PlanBuilder) buildAggregation(p LogicalPlan, aggFuncList []*ast.Aggrega
 	schema4Agg := expression.NewSchema(make([]*expression.Column, 0, len(aggFuncList)+p.Schema().Len())...)
 	// aggIdxMap maps the old index to new index after applying common aggregation functions elimination.
 	aggIndexMap := make(map[int]int)
+	plan4Agg.useFlash = b.useTiFlash
 
 	for i, aggFunc := range aggFuncList {
 		newArgList := make([]expression.Expression, 0, len(aggFunc.Args))
@@ -134,6 +135,7 @@ func (b *PlanBuilder) buildResultSetNode(node ast.ResultSetNode) (p LogicalPlan,
 	case *ast.Join:
 		return b.buildJoin(x)
 	case *ast.TableSource:
+		b.useTiFlash = x.UseFlash
 		switch v := x.Source.(type) {
 		case *ast.SelectStmt:
 			p, err = b.buildSelect(v)
@@ -150,6 +152,7 @@ func (b *PlanBuilder) buildResultSetNode(node ast.ResultSetNode) (p LogicalPlan,
 
 		if v, ok := p.(*DataSource); ok {
 			v.TableAsName = &x.AsName
+			v.useTiFlash = x.UseFlash
 		}
 		for _, col := range p.Schema().Columns {
 			col.OrigTblName = col.TblName
@@ -303,6 +306,7 @@ func (b *PlanBuilder) buildJoin(joinNode *ast.Join) (LogicalPlan, error) {
 	}
 
 	joinPlan := LogicalJoin{StraightJoin: joinNode.StraightJoin || b.inStraightJoin}.Init(b.ctx)
+	joinPlan.UseFlash = b.useTiFlash
 	joinPlan.SetChildren(leftPlan, rightPlan)
 	joinPlan.SetSchema(expression.MergeSchema(leftPlan.Schema(), rightPlan.Schema()))
 
@@ -480,6 +484,7 @@ func (b *PlanBuilder) buildSelection(p LogicalPlan, where ast.ExprNode, AggMappe
 	conditions := splitWhere(where)
 	expressions := make([]expression.Expression, 0, len(conditions))
 	selection := LogicalSelection{}.Init(b.ctx)
+	selection.useTiFlash = b.useTiFlash
 	for _, cond := range conditions {
 		expr, np, err := b.rewrite(cond, p, AggMapper, false)
 		if err != nil {
@@ -648,6 +653,7 @@ func (b *PlanBuilder) buildDistinct(child LogicalPlan, length int) *LogicalAggre
 	plan4Agg := LogicalAggregation{
 		AggFuncs:     make([]*aggregation.AggFuncDesc, 0, child.Schema().Len()),
 		GroupByItems: expression.Column2Exprs(child.Schema().Clone().Columns[:length]),
+		useFlash:     b.useTiFlash,
 	}.Init(b.ctx)
 	plan4Agg.collectGroupByColumns()
 	for _, col := range child.Schema().Columns {
@@ -1777,10 +1783,16 @@ func (b *PlanBuilder) TableHints() *tableHintInfo {
 }
 
 func (b *PlanBuilder) buildSelect(sel *ast.SelectStmt) (p LogicalPlan, err error) {
+	// when select * from a use flash, b limit 1, useTiFlash will be true when
+	// building a's plan. We need flip it back to flase when we build b's plan.
+	defer func() {
+		b.useTiFlash = false
+	}()
 	if b.pushTableHints(sel.TableHints) {
 		// table hints are only visible in the current SELECT statement.
 		defer b.popTableHints()
 	}
+
 	if sel.SelectStmtOpts != nil {
 		origin := b.inStraightJoin
 		b.inStraightJoin = sel.SelectStmtOpts.StraightJoin
@@ -1918,6 +1930,7 @@ func (b *PlanBuilder) buildSelect(sel *ast.SelectStmt) (p LogicalPlan, err error
 			col.UniqueID = b.ctx.GetSessionVars().AllocPlanColumnID()
 		}
 		proj.SetSchema(schema)
+
 		return proj, nil
 	}
 
@@ -2026,6 +2039,7 @@ func (b *PlanBuilder) buildDataSource(tn *ast.TableName) (LogicalPlan, error) {
 		statisticTable:      statisticTable,
 		indexHints:          tn.IndexHints,
 		possibleAccessPaths: possiblePaths,
+		useTiFlash:          b.useTiFlash,
 		Columns:             make([]*model.ColumnInfo, 0, len(columns)),
 	}.Init(b.ctx)
 

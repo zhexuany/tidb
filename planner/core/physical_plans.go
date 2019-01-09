@@ -57,6 +57,7 @@ type PhysicalTableReader struct {
 	// TablePlans flats the tablePlan to construct executor pb.
 	TablePlans []PhysicalPlan
 	tablePlan  PhysicalPlan
+	UseTiFlash bool
 }
 
 // PhysicalIndexReader is the index reader in tidb.
@@ -157,6 +158,7 @@ type PhysicalTableScan struct {
 
 	// The table scan may be a partition, rather than a real table.
 	isPartition     bool
+	UseTiFlash      bool
 	physicalTableID int64
 
 	rangeDecidedBy []*expression.Column
@@ -174,6 +176,7 @@ type PhysicalProjection struct {
 	Exprs                []expression.Expression
 	CalculateNoDelay     bool
 	AvoidColumnEvaluator bool
+	UseFlash             bool
 }
 
 // PhysicalTopN is the physical operator of topN.
@@ -212,6 +215,7 @@ type PhysicalHashJoin struct {
 	Concurrency   uint
 
 	DefaultValues []types.Datum
+	UseFlash      bool
 }
 
 // PhysicalIndexJoin represents the plan of index look up join.
@@ -234,6 +238,7 @@ type PhysicalIndexJoin struct {
 	Ranges []*ranger.Range
 	// KeyOff2IdxOff maps the offsets in join key to the offsets in the index.
 	KeyOff2IdxOff []int
+	UseFlash      bool
 }
 
 // PhysicalMergeJoin represents merge join for inner/ outer join.
@@ -250,6 +255,7 @@ type PhysicalMergeJoin struct {
 
 	LeftKeys  []*expression.Column
 	RightKeys []*expression.Column
+	UseFlash  bool
 }
 
 // PhysicalLock is the physical operator of lock, which is used for `select ... for update` clause.
@@ -302,6 +308,7 @@ type basePhysicalAgg struct {
 
 	AggFuncs     []*aggregation.AggFuncDesc
 	GroupByItems []expression.Expression
+	UseTiFlash   bool
 }
 
 func (p *basePhysicalAgg) hasDistinctFunc() bool {
@@ -361,6 +368,7 @@ type PhysicalSelection struct {
 	basePhysicalPlan
 
 	Conditions []expression.Expression
+	useTiFlash bool
 }
 
 // PhysicalMaxOneRow is the physical operator of maxOneRow.

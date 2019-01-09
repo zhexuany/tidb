@@ -48,6 +48,7 @@ type tableHintInfo struct {
 	indexNestedLoopJoinTables []model.CIStr
 	sortMergeJoinTables       []model.CIStr
 	hashJoinTables            []model.CIStr
+	useTiFlash                []model.CIStr
 }
 
 func (info *tableHintInfo) ifPreferMergeJoin(tableNames ...*model.CIStr) bool {
@@ -137,6 +138,8 @@ type PlanBuilder struct {
 	// inStraightJoin represents whether the current "SELECT" statement has
 	// "STRAIGHT_JOIN" option.
 	inStraightJoin bool
+
+	useTiFlash bool
 
 	windowSpecs map[string]ast.WindowSpec
 }
@@ -478,7 +481,7 @@ func (b *PlanBuilder) buildCheckIndex(dbName model.CIStr, as *ast.AdminStmt) (Pl
 	ts.SetSchema(is.dataSourceSchema)
 	cop.tablePlan = ts
 	is.initSchema(id, idx, true)
-	t := finishCopTask(b.ctx, cop)
+	t := finishCopTask(b.ctx, cop, false)
 
 	rootT := t.(*rootTask)
 	return rootT.p, nil

@@ -123,12 +123,20 @@ func (p *PhysicalTableScan) ExplainInfo() string {
 	if p.stats.UsePseudoStats {
 		buffer.WriteString(", stats:pseudo")
 	}
+
+	if p.UseTiFlash {
+		return "redirect to tiflash: " + buffer.String()
+	}
 	return buffer.String()
 }
 
 // ExplainInfo implements PhysicalPlan interface.
 func (p *PhysicalTableReader) ExplainInfo() string {
-	return "data:" + p.tablePlan.ExplainID()
+	explainedInfo := "data:" + p.tablePlan.ExplainID()
+	if p.UseTiFlash {
+		return "redirect to tiflash: " + explainedInfo
+	}
+	return explainedInfo
 }
 
 // ExplainInfo implements PhysicalPlan interface.
@@ -149,7 +157,11 @@ func (p *PhysicalUnionScan) ExplainInfo() string {
 
 // ExplainInfo implements PhysicalPlan interface.
 func (p *PhysicalSelection) ExplainInfo() string {
-	return string(expression.SortedExplainExpressionList(p.Conditions))
+	explainStr := string(expression.SortedExplainExpressionList(p.Conditions))
+	if p.useTiFlash {
+		return "redirect to tiflash: " + explainStr
+	}
+	return explainStr
 }
 
 // ExplainInfo implements PhysicalPlan interface.
@@ -185,6 +197,7 @@ func (p *PhysicalLimit) ExplainInfo() string {
 
 // ExplainInfo implements PhysicalPlan interface.
 func (p *basePhysicalAgg) ExplainInfo() string {
+
 	buffer := bytes.NewBufferString("")
 	if len(p.GroupByItems) > 0 {
 		fmt.Fprintf(buffer, "group by:%s, ",
@@ -198,6 +211,9 @@ func (p *basePhysicalAgg) ExplainInfo() string {
 				buffer.WriteString(", ")
 			}
 		}
+	}
+	if p.UseTiFlash {
+		return "redirect to tiflash: " + buffer.String()
 	}
 	return buffer.String()
 }

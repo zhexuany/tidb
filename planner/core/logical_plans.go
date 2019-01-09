@@ -122,6 +122,8 @@ type LogicalJoin struct {
 	// redundantSchema contains columns which are eliminated in join.
 	// For select * from a join b using (c); a.c will in output schema, and b.c will in redundantSchema.
 	redundantSchema *expression.Schema
+
+	UseFlash bool
 }
 
 func (p *LogicalJoin) columnSubstitute(schema *expression.Schema, exprs []expression.Expression) {
@@ -215,6 +217,8 @@ type LogicalAggregation struct {
 
 	possibleProperties [][]*expression.Column
 	inputCount         float64 // inputCount is the input count of this plan.
+
+	useFlash bool
 }
 
 func (la *LogicalAggregation) extractCorrelatedCols() []*expression.CorrelatedColumn {
@@ -238,6 +242,8 @@ type LogicalSelection struct {
 	// but after we converted to CNF(Conjunctive normal form), it can be
 	// split into a list of AND conditions.
 	Conditions []expression.Expression
+
+	useTiFlash bool
 }
 
 func (p *LogicalSelection) extractCorrelatedCols() []*expression.CorrelatedColumn {
@@ -311,6 +317,7 @@ type DataSource struct {
 
 	// The data source may be a partition, rather than a real table.
 	isPartition     bool
+	useTiFlash      bool
 	physicalTableID int64
 }
 

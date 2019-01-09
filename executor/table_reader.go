@@ -15,6 +15,11 @@ package executor
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"github.com/pingcap/tidb/types"
+	"github.com/zhexuany/parser/mysql"
+	"strings"
 	"time"
 
 	"github.com/opentracing/opentracing-go"
@@ -55,11 +60,34 @@ type TableReaderExecutor struct {
 	corColInFilter bool
 	// corColInAccess tells whether there's correlated column in access conditions.
 	corColInAccess bool
-	plans          []plannercore.PhysicalPlan
+	useTiFlash     bool
+
+	tiFlishConn *sql.DB
+	flashSQL    string
+	rows        *sql.Rows
+	dbName      string
+	plans       []plannercore.PhysicalPlan
 }
 
 // Open initialzes necessary variables for using this executor.
 func (e *TableReaderExecutor) Open(ctx context.Context) error {
+	if e.useTiFlash {
+		var err error
+		connectStr := fmt.Sprintf("tcp://127.0.0.1:9000?debug=true&database=%s", "default")
+		//connectStr := fmt.Sprintf("tcp://127.0.0.1:9000?debug=true&database=%s", e.dbName)
+		e.tiFlishConn, err = sql.Open("clickhouse",
+			connectStr)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		e.rows, err = e.tiFlishConn.Query(e.flashSQL)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		return nil
+	}
+
 	var err error
 	if e.corColInFilter {
 		e.dagPB.Executors, _, err = constructDistExec(e.ctx, e.plans)
@@ -98,9 +126,93 @@ func (e *TableReaderExecutor) Open(ctx context.Context) error {
 	return nil
 }
 
+func convertValue(name string) interface{} {
+	switch name {
+	case "Float64":
+		v := float64(0)
+		return &v
+	case "Int32", "UInt64":
+		v := uint64(0)
+		return &v
+	case "Date":
+		t := time.Now()
+		return &t
+	case "String":
+		s := ""
+		return &s
+	}
+
+	if strings.Contains(name, "FixedString") {
+		s := ""
+		return &s
+	}
+	return nil
+}
+
+func toTiDBTp(name string) byte {
+	switch name {
+	case "Int32":
+		return mysql.TypeLonglong
+	case "Float64":
+		return mysql.TypeDouble
+	case "UInt64":
+		return mysql.TypeLonglong
+	case "Date":
+		return mysql.TypeDate
+	case "DateTime":
+		return mysql.TypeDatetime
+	case "String":
+		return mysql.TypeString
+	}
+
+	if strings.Contains(name, "FixedString") {
+		return mysql.TypeString
+	}
+	return mysql.TypeNull
+}
+
 // Next fills data into the chunk passed by its caller.
 // The task was actually done by tableReaderHandler.
 func (e *TableReaderExecutor) Next(ctx context.Context, chk *chunk.Chunk) error {
+	if e.useTiFlash {
+		defer e.rows.Close()
+		chk.Reset()
+
+		colTps, _ := e.rows.ColumnTypes()
+		results := make([]interface{}, len(colTps))
+		for e.rows.Next() {
+			for i := 0; i < len(colTps); i++ {
+				results[i] = convertValue(colTps[i].DatabaseTypeName())
+			}
+			if err := e.rows.Scan(results...); err != nil {
+				return err
+			}
+
+			for i := 0; i < len(results); i++ {
+				switch toTiDBTp(colTps[i].DatabaseTypeName()) {
+				case mysql.TypeString:
+					chk.AppendString(i, *results[i].(*string))
+				case mysql.TypeDecimal:
+					myDec := &types.MyDecimal{}
+					myDec.FromFloat64(*results[i].(*float64))
+					chk.AppendMyDecimal(i, myDec)
+				case mysql.TypeDouble:
+					chk.AppendFloat64(i, *results[i].(*float64))
+				case mysql.TypeLonglong, mysql.TypeShort, mysql.TypeLong:
+					chk.AppendUint64(i, *results[i].(*uint64))
+				case mysql.TypeDate:
+					goTime := *results[i].(*time.Time)
+					t := types.Time{Time: types.FromGoTime(goTime)}
+					chk.AppendTime(i, t)
+				default:
+					panic(fmt.Sprintf("%s is not supported", colTps[i].DatabaseTypeName()))
+				}
+			}
+		}
+
+		return nil
+	}
+
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
 		span1 := span.Tracer().StartSpan("tableReader.Next", opentracing.ChildOf(span.Context()))
 		defer span1.Finish()
@@ -118,6 +230,9 @@ func (e *TableReaderExecutor) Next(ctx context.Context, chk *chunk.Chunk) error 
 
 // Close implements the Executor Close interface.
 func (e *TableReaderExecutor) Close() error {
+	if e.useTiFlash {
+		return nil
+	}
 	err := e.resultHandler.Close()
 	if e.runtimeStats != nil {
 		copStats := e.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.Get(e.plans[0].ExplainID())

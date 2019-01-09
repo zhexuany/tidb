@@ -57,7 +57,8 @@ type executorBuilder struct {
 	is      infoschema.InfoSchema
 	startTS uint64 // cached when the first time getStartTS() is called
 	// err is set when there is error happened during Executor building process.
-	err error
+	err             error
+	projPartisqlSQL string
 }
 
 func newExecutorBuilder(ctx sessionctx.Context, is infoschema.InfoSchema) *executorBuilder {
@@ -979,6 +980,7 @@ func (b *executorBuilder) buildHashAgg(v *plannercore.PhysicalHashAgg) Executor 
 		sc:              sessionVars.StmtCtx,
 		PartialAggFuncs: make([]aggfuncs.AggFunc, 0, len(v.AggFuncs)),
 		GroupByItems:    v.GroupByItems,
+		useTiFlash:      v.UseTiFlash,
 	}
 	// We take `create table t(a int, b int);` as example.
 	//
@@ -1054,11 +1056,13 @@ func (b *executorBuilder) buildStreamAgg(v *plannercore.PhysicalStreamAgg) Execu
 		b.err = errors.Trace(b.err)
 		return nil
 	}
+
 	e := &StreamAggExec{
 		baseExecutor: newBaseExecutor(b.ctx, v.Schema(), v.ExplainID(), src),
 		StmtCtx:      b.ctx.GetSessionVars().StmtCtx,
 		aggFuncs:     make([]aggfuncs.AggFunc, 0, len(v.AggFuncs)),
 		GroupByItems: v.GroupByItems,
+		useTiFlash:   v.UseTiFlash,
 	}
 	if len(v.GroupByItems) != 0 || aggregation.IsAllFirstRow(v.AggFuncs) {
 		e.defaultVal = nil
@@ -1092,11 +1096,14 @@ func (b *executorBuilder) buildSelection(v *plannercore.PhysicalSelection) Execu
 }
 
 func (b *executorBuilder) buildProjection(v *plannercore.PhysicalProjection) Executor {
+	proj, _ := v.ToPartialSQL()
+	b.projPartisqlSQL = proj
 	childExec := b.build(v.Children()[0])
 	if b.err != nil {
 		b.err = errors.Trace(b.err)
 		return nil
 	}
+
 	e := &ProjectionExec{
 		baseExecutor:     newBaseExecutor(b.ctx, v.Schema(), v.ExplainID(), childExec),
 		numWorkers:       b.ctx.GetSessionVars().ProjectionConcurrency,
@@ -1600,6 +1607,54 @@ func containsLimit(execs []*tipb.Executor) bool {
 	return false
 }
 
+func buildFlashSQL(b *executorBuilder, v *plannercore.PhysicalTableReader) (string, string, error) {
+	var where, groupBy, aggFunc, table, dbName string
+	var err error
+	for i := 0; i < len(v.TablePlans); i++ {
+		switch p := v.TablePlans[i].(type) {
+		case *plannercore.PhysicalHashAgg:
+			groupBy, aggFunc, err = p.ToPartialSQL()
+		case *plannercore.PhysicalStreamAgg:
+			groupBy, aggFunc, err = p.ToPartialSQL()
+		case *plannercore.PhysicalSelection:
+			where, err = p.ToPartialSQL()
+		case *plannercore.PhysicalTableScan:
+			table, err = p.ToPartialSQL()
+			dbName = p.DBName.L
+		}
+	}
+
+	fallBack, _ := v.ToPartialSQL()
+	var buf bytes.Buffer
+	buf.WriteString("select ")
+	if aggFunc != "" {
+		buf.WriteString(aggFunc)
+	} else if b.projPartisqlSQL != "" {
+		buf.WriteString(b.projPartisqlSQL)
+	} else if fallBack != "" {
+		buf.WriteString(fallBack)
+	} else {
+		buf.WriteString("*")
+	}
+
+	if table != "" {
+		buf.WriteString(" from ")
+		buf.WriteString(table)
+	} else {
+		err = errors.New("from clause cannot be empty")
+	}
+	if where != "" {
+		buf.WriteString(" where ")
+		buf.WriteString(where)
+	}
+
+	if groupBy != "" {
+		buf.WriteString(" group by ")
+		buf.WriteString(groupBy)
+	}
+	return buf.String(), dbName, err
+}
+
 func buildNoRangeTableReader(b *executorBuilder, v *plannercore.PhysicalTableReader) (*TableReaderExecutor, error) {
 	dagReq, streaming, err := b.constructDAGReq(v.TablePlans)
 	if err != nil {
@@ -1620,6 +1675,7 @@ func buildNoRangeTableReader(b *executorBuilder, v *plannercore.PhysicalTableRea
 		corColInAccess:  b.corColInAccess(v.TablePlans[0]),
 		plans:           v.TablePlans,
 	}
+
 	if isPartition, physicalTableID := ts.IsPartition(); isPartition {
 		e.physicalTableID = physicalTableID
 	}
@@ -1654,6 +1710,8 @@ func (b *executorBuilder) buildTableReader(v *plannercore.PhysicalTableReader) *
 	ret.ranges = ts.Ranges
 	sctx := b.ctx.GetSessionVars().StmtCtx
 	sctx.TableIDs = append(sctx.TableIDs, ts.Table.ID)
+	ret.useTiFlash = ts.UseTiFlash
+	ret.flashSQL, ret.dbName, _ = buildFlashSQL(b, v)
 	return ret
 }
 

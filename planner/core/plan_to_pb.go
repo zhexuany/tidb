@@ -14,6 +14,7 @@
 package core
 
 import (
+	"bytes"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/parser/model"
 	"github.com/pingcap/tidb/expression"
@@ -28,6 +29,19 @@ import (
 // ToPB implements PhysicalPlan ToPB interface.
 func (p *basePhysicalPlan) ToPB(_ sessionctx.Context) (*tipb.Executor, error) {
 	return nil, errors.Errorf("plan %s fails converts to PB", p.basePlan.ExplainID())
+}
+
+func groupByToPartialSQL(groupBys []expression.Expression) string {
+	var buf bytes.Buffer
+	length := len(groupBys)
+	buf.WriteString("group by ")
+	for i := 0; i < length; i++ {
+		buf.WriteString(groupBys[i].String())
+		if i < length-1 {
+			buf.WriteString(", ")
+		}
+	}
+	return buf.String()
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
@@ -60,6 +74,7 @@ func (p *PhysicalStreamAgg) ToPB(ctx sessionctx.Context) (*tipb.Executor, error)
 func (p *PhysicalSelection) ToPB(ctx sessionctx.Context) (*tipb.Executor, error) {
 	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
+
 	selExec := &tipb.Selection{
 		Conditions: expression.ExpressionsToPBList(sc, p.Conditions, client),
 	}
@@ -95,6 +110,7 @@ func (p *PhysicalTableScan) ToPB(ctx sessionctx.Context) (*tipb.Executor, error)
 		Columns: model.ColumnsToProto(columns, p.Table.PKIsHandle),
 		Desc:    p.Desc,
 	}
+
 	err := SetPBColumnsDefaultValue(ctx, tsExec.Columns, p.Columns)
 	return &tipb.Executor{Tp: tipb.ExecType_TypeTableScan, TblScan: tsExec}, errors.Trace(err)
 }

@@ -77,6 +77,7 @@ func (p *baseLogicalPlan) findBestTask(prop *property.PhysicalProperty) (bestTas
 	if prop == nil {
 		return nil, nil
 	}
+
 	// Look up the task with this prop in the task map.
 	// It's used to reduce double counting.
 	bestTask = p.getTask(prop)
@@ -107,6 +108,7 @@ func (p *baseLogicalPlan) findBestTask(prop *property.PhysicalProperty) (bestTas
 		// Next, get the bestTask with enforced prop
 		prop.Items = []property.Item{}
 	}
+
 	physicalPlans := p.self.exhaustPhysicalPlans(prop)
 	prop.Items = oldPropCols
 
@@ -169,6 +171,7 @@ func (ds *DataSource) tryToGetMemTask(prop *property.PhysicalProperty) (task tas
 	if len(ds.pushedDownConds) > 0 {
 		sel := PhysicalSelection{
 			Conditions: ds.pushedDownConds,
+			useTiFlash: ds.useTiFlash,
 		}.Init(ds.ctx, ds.stats)
 		sel.SetChildren(memTable)
 		retPlan = sel
@@ -410,7 +413,7 @@ func (ds *DataSource) convertToIndexScan(prop *property.PhysicalProperty, path *
 		is.addPushedDownSelection(cop, ds, expectedCnt, path)
 	}
 	if prop.TaskTp == property.RootTaskType {
-		task = finishCopTask(ds.ctx, task)
+		task = finishCopTask(ds.ctx, task, false)
 	} else if _, ok := task.(*rootTask); ok {
 		return invalidTask, nil
 	}
@@ -511,6 +514,7 @@ func (ds *DataSource) convertToTableScan(prop *property.PhysicalProperty, path *
 		TableAsName:     ds.TableAsName,
 		DBName:          ds.DBName,
 		isPartition:     ds.isPartition,
+		UseTiFlash:      ds.useTiFlash,
 		physicalTableID: ds.physicalTableID,
 	}.Init(ds.ctx)
 	ts.SetSchema(ds.schema)
@@ -560,7 +564,7 @@ func (ds *DataSource) convertToTableScan(prop *property.PhysicalProperty, path *
 		ts.addPushedDownSelection(copTask, ds.stats.ScaleByExpectCnt(expectedCnt))
 	}
 	if prop.TaskTp == property.RootTaskType {
-		task = finishCopTask(ds.ctx, task)
+		task = finishCopTask(ds.ctx, task, ds.useTiFlash)
 	} else if _, ok := task.(*rootTask); ok {
 		return invalidTask, nil
 	}
@@ -571,7 +575,10 @@ func (ts *PhysicalTableScan) addPushedDownSelection(copTask *copTask, stats *pro
 	// Add filter condition to table plan now.
 	if len(ts.filterCondition) > 0 {
 		copTask.cst += copTask.count() * cpuFactor
-		sel := PhysicalSelection{Conditions: ts.filterCondition}.Init(ts.ctx, stats)
+		sel := PhysicalSelection{
+			Conditions: ts.filterCondition,
+			useTiFlash: ts.UseTiFlash,
+		}.Init(ts.ctx, stats)
 		sel.SetChildren(ts)
 		copTask.tablePlan = sel
 	}

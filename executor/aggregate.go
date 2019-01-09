@@ -15,6 +15,7 @@ package executor
 
 import (
 	"context"
+	"database/sql"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/pingcap/tidb/util/set"
 	log "github.com/sirupsen/logrus"
 	"github.com/spaolacci/murmur3"
+	_ "github.com/zanmato1984/clickhouse"
 )
 
 type aggPartialResultMapper map[string][]aggfuncs.PartialResult
@@ -161,8 +163,9 @@ type HashAggExec struct {
 	defaultVal       *chunk.Chunk
 	// isChildReturnEmpty indicates whether the child executor only returns an empty input.
 	isChildReturnEmpty bool
-
-	childResult *chunk.Chunk
+	useTiFlash         bool
+	tiFlishConn        *sql.DB
+	childResult        *chunk.Chunk
 }
 
 // HashAggInput indicates the input of hash agg exec.
@@ -195,6 +198,9 @@ func (d *HashAggIntermData) getPartialResultBatch(sc *stmtctx.StatementContext, 
 
 // Close implements the Executor Close interface.
 func (e *HashAggExec) Close() error {
+	if e.useTiFlash {
+		return nil
+	}
 	if e.isUnparallelExec {
 		e.childResult = nil
 		e.groupSet = nil
@@ -221,16 +227,22 @@ func (e *HashAggExec) Close() error {
 
 // Open implements the Executor Open interface.
 func (e *HashAggExec) Open(ctx context.Context) error {
-	if err := e.baseExecutor.Open(ctx); err != nil {
-		return errors.Trace(err)
-	}
-	e.prepared = false
+	if e.useTiFlash {
+		if err := e.baseExecutor.Open(ctx); err != nil {
+			return errors.Trace(err)
+		}
+	} else {
+		if err := e.baseExecutor.Open(ctx); err != nil {
+			return errors.Trace(err)
+		}
+		e.prepared = false
 
-	if e.isUnparallelExec {
-		e.initForUnparallelExec()
-		return nil
+		if e.isUnparallelExec {
+			e.initForUnparallelExec()
+			return nil
+		}
+		e.initForParallelExec(e.ctx)
 	}
-	e.initForParallelExec(e.ctx)
 	return nil
 }
 
@@ -519,6 +531,15 @@ func (w *HashAggFinalWorker) run(ctx sessionctx.Context, waitGroup *sync.WaitGro
 
 // Next implements the Executor Next interface.
 func (e *HashAggExec) Next(ctx context.Context, chk *chunk.Chunk) error {
+	// when useTiFlash enabled, directly call its children's next will be just fine.
+	if e.useTiFlash {
+		err := e.children[0].Next(ctx, chk)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		return nil
+	}
+
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
 		span1 := span.Tracer().StartSpan("hashagg.Next", opentracing.ChildOf(span.Context()))
 		defer span1.Finish()
@@ -770,22 +791,30 @@ type StreamAggExec struct {
 	partialResults     []aggfuncs.PartialResult
 	groupRows          []chunk.Row
 	childResult        *chunk.Chunk
+	useTiFlash         bool
 }
 
 // Open implements the Executor Open interface.
 func (e *StreamAggExec) Open(ctx context.Context) error {
-	if err := e.baseExecutor.Open(ctx); err != nil {
-		return errors.Trace(err)
-	}
-	e.childResult = e.children[0].newFirstChunk()
-	e.executed = false
-	e.isChildReturnEmpty = true
-	e.inputIter = chunk.NewIterator4Chunk(e.childResult)
-	e.inputRow = e.inputIter.End()
+	if e.useTiFlash {
+		if err := e.baseExecutor.Open(ctx); err != nil {
+			return errors.Trace(err)
+		}
+		return nil
+	} else {
+		if err := e.baseExecutor.Open(ctx); err != nil {
+			return errors.Trace(err)
+		}
+		e.childResult = e.children[0].newFirstChunk()
+		e.executed = false
+		e.isChildReturnEmpty = true
+		e.inputIter = chunk.NewIterator4Chunk(e.childResult)
+		e.inputRow = e.inputIter.End()
 
-	e.partialResults = make([]aggfuncs.PartialResult, 0, len(e.aggFuncs))
-	for _, aggFunc := range e.aggFuncs {
-		e.partialResults = append(e.partialResults, aggFunc.AllocPartialResult())
+		e.partialResults = make([]aggfuncs.PartialResult, 0, len(e.aggFuncs))
+		for _, aggFunc := range e.aggFuncs {
+			e.partialResults = append(e.partialResults, aggFunc.AllocPartialResult())
+		}
 	}
 
 	return nil
@@ -793,12 +822,23 @@ func (e *StreamAggExec) Open(ctx context.Context) error {
 
 // Close implements the Executor Close interface.
 func (e *StreamAggExec) Close() error {
-	e.childResult = nil
+	if !e.useTiFlash {
+		e.childResult = nil
+	}
 	return errors.Trace(e.baseExecutor.Close())
 }
 
 // Next implements the Executor Next interface.
 func (e *StreamAggExec) Next(ctx context.Context, chk *chunk.Chunk) error {
+	if e.useTiFlash {
+		chk.Reset()
+		if err := e.children[0].Next(ctx, chk); err != nil {
+			return errors.Trace(err)
+		}
+		if chk.NumRows() == 0 {
+			return nil
+		}
+	}
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
 		span1 := span.Tracer().StartSpan("streamAgg.Next", opentracing.ChildOf(span.Context()))
 		defer span1.Finish()
