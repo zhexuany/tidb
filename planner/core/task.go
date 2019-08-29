@@ -345,6 +345,34 @@ func (p *PhysicalMergeJoin) attach2Task(tasks ...task) task {
 	}
 }
 
+// splitCopAvg2CountAndSum splits the cop avg function to count and sum.
+// Now it's only used for TableReader.
+func splitCopAvg2CountAndSum(p PhysicalPlan) {
+	var baseAgg *basePhysicalAgg
+	if agg, ok := p.(*PhysicalStreamAgg); ok {
+		baseAgg = &agg.basePhysicalAgg
+	}
+	if agg, ok := p.(*PhysicalHashAgg); ok {
+		baseAgg = &agg.basePhysicalAgg
+	}
+	if baseAgg == nil {
+		return
+	}
+	for i := len(baseAgg.AggFuncs) - 1; i >= 0; i-- {
+		f := baseAgg.AggFuncs[i]
+		if f.Name == ast.AggFuncAvg {
+			sumAgg := *f
+			sumAgg.Name = ast.AggFuncSum
+			sumAgg.RetTp = baseAgg.Schema().Columns[i+1].RetType
+			cntAgg := *f
+			cntAgg.Name = ast.AggFuncCount
+			cntAgg.RetTp = baseAgg.Schema().Columns[i].RetType
+			cntAgg.RetTp.Flag = f.RetTp.Flag
+			baseAgg.AggFuncs = append(baseAgg.AggFuncs[:i], append([]*aggregation.AggFuncDesc{&cntAgg, &sumAgg}, baseAgg.AggFuncs[i+1:]...)...)
+		}
+	}
+}
+
 // finishCopTask means we close the coprocessor task and create a root task.
 func finishCopTask(ctx sessionctx.Context, task task) task {
 	t, ok := task.(*copTask)
@@ -415,27 +443,7 @@ func finishCopTask(ctx sessionctx.Context, task task) task {
 		newTask.p = p
 	} else {
 		tp := t.tablePlan
-		var baseAgg *basePhysicalAgg
-		if agg, ok := tp.(*PhysicalStreamAgg); ok {
-			baseAgg = &agg.basePhysicalAgg
-		}
-		if agg, ok := tp.(*PhysicalHashAgg); ok {
-			baseAgg = &agg.basePhysicalAgg
-		}
-		if baseAgg != nil {
-			for i := len(baseAgg.AggFuncs) - 1; i >= 0; i-- {
-				f := baseAgg.AggFuncs[i]
-				if f.Name == ast.AggFuncAvg {
-					sumAgg := *f
-					sumAgg.Name = ast.AggFuncSum
-					sumAgg.RetTp = f.Args[0].GetType()
-					cntAgg := *f
-					cntAgg.Name = ast.AggFuncCount
-					cntAgg.RetTp = baseAgg.Schema().Columns[i].RetType
-					baseAgg.AggFuncs = append(baseAgg.AggFuncs[:i], append([]*aggregation.AggFuncDesc{&cntAgg, &sumAgg}, baseAgg.AggFuncs[i+1:]...)...)
-				}
-			}
-		}
+		splitCopAvg2CountAndSum(tp)
 		for len(tp.Children()) > 0 {
 			tp = tp.Children()[0]
 		}
