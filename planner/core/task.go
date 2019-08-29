@@ -415,6 +415,27 @@ func finishCopTask(ctx sessionctx.Context, task task) task {
 		newTask.p = p
 	} else {
 		tp := t.tablePlan
+		var baseAgg *basePhysicalAgg
+		if agg, ok := tp.(*PhysicalStreamAgg); ok {
+			baseAgg = &agg.basePhysicalAgg
+		}
+		if agg, ok := tp.(*PhysicalHashAgg); ok {
+			baseAgg = &agg.basePhysicalAgg
+		}
+		if baseAgg != nil {
+			for i := len(baseAgg.AggFuncs) - 1; i >= 0; i-- {
+				f := baseAgg.AggFuncs[i]
+				if f.Name == ast.AggFuncAvg {
+					sumAgg := *f
+					sumAgg.Name = ast.AggFuncSum
+					sumAgg.RetTp = f.Args[0].GetType()
+					cntAgg := *f
+					cntAgg.Name = ast.AggFuncCount
+					cntAgg.RetTp = baseAgg.Schema().Columns[i].RetType
+					baseAgg.AggFuncs = append(baseAgg.AggFuncs[:i], append([]*aggregation.AggFuncDesc{&cntAgg, &sumAgg}, baseAgg.AggFuncs[i+1:]...)...)
+				}
+			}
+		}
 		for len(tp.Children()) > 0 {
 			tp = tp.Children()[0]
 		}
