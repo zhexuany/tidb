@@ -27,6 +27,7 @@ import (
 	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/infoschema"
+	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/table"
@@ -635,12 +636,21 @@ func (e *Explain) explainPlanInRowFormat(p PhysicalPlan, taskType, indent string
 
 	switch copPlan := p.(type) {
 	case *PhysicalTableReader:
-		e.explainPlanInRowFormat(copPlan.tablePlan, "cop", childIndent, true)
+		var storeType string
+		switch copPlan.StoreType {
+		case kv.TiKV:
+			storeType = "tikv"
+		case kv.TiFlash:
+			storeType = "tiflash"
+		default:
+			storeType = "unknown"
+		}
+		e.explainPlanInRowFormat(copPlan.tablePlan, "cop["+storeType+"]", childIndent, true)
 	case *PhysicalIndexReader:
-		e.explainPlanInRowFormat(copPlan.indexPlan, "cop", childIndent, true)
+		e.explainPlanInRowFormat(copPlan.indexPlan, "cop[tikv]", childIndent, true)
 	case *PhysicalIndexLookUpReader:
-		e.explainPlanInRowFormat(copPlan.indexPlan, "cop", childIndent, false)
-		e.explainPlanInRowFormat(copPlan.tablePlan, "cop", childIndent, true)
+		e.explainPlanInRowFormat(copPlan.indexPlan, "cop[tikv]", childIndent, false)
+		e.explainPlanInRowFormat(copPlan.tablePlan, "cop[tikv]", childIndent, true)
 	}
 }
 
