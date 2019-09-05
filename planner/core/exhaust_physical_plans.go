@@ -304,7 +304,7 @@ func (p *LogicalJoin) constructIndexJoin(
 	innerTask task,
 	ranges []*ranger.Range,
 	keyOff2IdxOff []int,
-	lens []int,
+	path *accessPath,
 	compareFilters *ColWithCmpFuncManager,
 ) []PhysicalPlan {
 	joinType := p.JoinType
@@ -356,13 +356,62 @@ func (p *LogicalJoin) constructIndexJoin(
 		DefaultValues:   p.DefaultValues,
 		innerTask:       innerTask,
 		KeyOff2IdxOff:   newKeyOff,
-		IdxColLens:      lens,
 		Ranges:          ranges,
 		KeepOuterOrder:  len(prop.Items) > 0,
 		CompareFilters:  compareFilters,
 	}.Init(p.ctx, p.stats.ScaleByExpectCnt(prop.ExpectedCnt), chReqProps...)
+	if path != nil {
+		join.IdxColLens = path.idxColLens
+	}
 	join.SetSchema(p.schema)
 	return []PhysicalPlan{join}
+}
+
+func (p *LogicalJoin) constructIndexMergeJoin(
+	prop *property.PhysicalProperty,
+	outerIdx int,
+	innerTask task,
+	ranges []*ranger.Range,
+	keyOff2IdxOff []int,
+	path *accessPath,
+	compareFilters *ColWithCmpFuncManager,
+) []PhysicalPlan {
+	indexJoins := p.constructIndexJoin(prop, outerIdx, innerTask, ranges, keyOff2IdxOff, path, compareFilters)
+	indexMergeJoins := make([]PhysicalPlan, 0, len(indexJoins))
+	for _, plan := range indexJoins {
+		join := plan.(*PhysicalIndexJoin)
+		// isOuterKeysPrefix means whether the outer join keys are the prefix of the prop items.
+		isOuterKeysPrefix := len(join.OuterJoinKeys) <= len(prop.Items)
+		compareFuncs := make([]expression.CompareFunc, 0, len(join.OuterJoinKeys))
+		outerCompareFuncs := make([]expression.CompareFunc, 0, len(join.OuterJoinKeys))
+		for i := range join.OuterJoinKeys {
+			if isOuterKeysPrefix && !prop.Items[i].Col.Equal(nil, join.OuterJoinKeys[i]) {
+				isOuterKeysPrefix = false
+			}
+			compareFuncs = append(compareFuncs, expression.GetCmpFunction(join.OuterJoinKeys[i], join.InnerJoinKeys[i]))
+			outerCompareFuncs = append(outerCompareFuncs, expression.GetCmpFunction(join.OuterJoinKeys[i], join.OuterJoinKeys[i]))
+		}
+		// canKeepOuterOrder means whether the prop items are the prefix of the outer join keys.
+		canKeepOuterOrder := len(prop.Items) <= len(join.OuterJoinKeys)
+		for i := 0; canKeepOuterOrder && i < len(prop.Items); i++ {
+			if !prop.Items[i].Col.Equal(nil, join.OuterJoinKeys[i]) {
+				canKeepOuterOrder = false
+			}
+		}
+		// Since index merge join requires prop items the prefix of outer join keys
+		// or outer join keys the prefix of the prop items. So we need `canKeepOuterOrder` or
+		// `isOuterKeysPrefix` to be true.
+		if canKeepOuterOrder || isOuterKeysPrefix {
+			indexMergeJoin := PhysicalIndexMergeJoin{
+				PhysicalIndexJoin: *join,
+				NeedOuterSort:     !isOuterKeysPrefix,
+				CompareFuncs:      compareFuncs,
+				OuterCompareFuncs: outerCompareFuncs,
+			}.Init(p.ctx)
+			indexMergeJoins = append(indexMergeJoins, indexMergeJoin)
+		}
+	}
+	return indexMergeJoins
 }
 
 // getIndexJoinByOuterIdx will generate index join by outerIndex. OuterIdx points out the outer child.
@@ -413,10 +462,17 @@ func (p *LogicalJoin) getIndexJoinByOuterIdx(prop *property.PhysicalProperty, ou
 			keyOff2IdxOff[i] = 0
 		}
 		if pkMatched {
-			innerTask := p.constructInnerTableScanTask(ds, pkCol, outerJoinKeys, us)
+			joins := make([]PhysicalPlan, 0, 2)
+
+			innerTask := p.constructInnerTableScanTask(ds, pkCol, outerJoinKeys, us, false)
+			joins = append(joins, p.constructIndexJoin(prop, outerIdx, innerTask, nil, keyOff2IdxOff, nil, nil)...)
+			// The index merge join's inner plan is different from index join, so we should consturct another inner plan
+			// for it.
+			innerTask2 := p.constructInnerTableScanTask(ds, pkCol, outerJoinKeys, us, true)
+			joins = append(joins, p.constructIndexMergeJoin(prop, outerIdx, innerTask2, nil, keyOff2IdxOff, nil, nil)...)
 			// Since the primary key means one value corresponding to exact one row, this will always be a no worse one
 			// comparing to other index.
-			return p.constructIndexJoin(prop, outerIdx, innerTask, nil, keyOff2IdxOff, nil, nil)
+			return joins
 		}
 	}
 	// if DataSource prefer flash, then inner child of index join can't be the index scan.
@@ -429,8 +485,7 @@ func (p *LogicalJoin) getIndexJoinByOuterIdx(prop *property.PhysicalProperty, ou
 		if path.isTablePath {
 			continue
 		}
-		indexInfo := path.index
-		emptyRange, err := helper.analyzeLookUpFilters(indexInfo, ds, innerJoinKeys)
+		emptyRange, err := helper.analyzeLookUpFilters(path, ds, innerJoinKeys)
 		if emptyRange {
 			return nil
 		}
@@ -438,7 +493,7 @@ func (p *LogicalJoin) getIndexJoinByOuterIdx(prop *property.PhysicalProperty, ou
 			logutil.BgLogger().Warn("build index join failed", zap.Error(err))
 		}
 	}
-	if helper.chosenIndexInfo != nil {
+	if helper.chosenPath != nil {
 		keyOff2IdxOff := make([]int, len(innerJoinKeys))
 		for i := range keyOff2IdxOff {
 			keyOff2IdxOff[i] = -1
@@ -448,10 +503,16 @@ func (p *LogicalJoin) getIndexJoinByOuterIdx(prop *property.PhysicalProperty, ou
 				keyOff2IdxOff[keyOff] = idxOff
 			}
 		}
-		idxCols, lens := expression.IndexInfo2Cols(ds.schema.Columns, helper.chosenIndexInfo)
-		rangeInfo := helper.buildRangeDecidedByInformation(idxCols, outerJoinKeys)
-		innerTask := p.constructInnerIndexScanTask(ds, helper.chosenIndexInfo, helper.chosenRemained, outerJoinKeys, us, rangeInfo)
-		return p.constructIndexJoin(prop, outerIdx, innerTask, helper.chosenRanges, keyOff2IdxOff, lens, helper.lastColManager)
+		joins := make([]PhysicalPlan, 0, 2)
+		rangeInfo := helper.buildRangeDecidedByInformation(helper.chosenPath.idxCols, outerJoinKeys)
+		innerTask := p.constructInnerIndexScanTask(ds, helper.chosenPath, helper.chosenRemained, outerJoinKeys, us, rangeInfo, false)
+
+		joins = append(joins, p.constructIndexJoin(prop, outerIdx, innerTask, helper.chosenRanges, keyOff2IdxOff, helper.chosenPath, helper.lastColManager)...)
+		// The index merge join's inner plan is different from index join, so we should consturct another inner plan
+		// for it.
+		innerTask2 := p.constructInnerIndexScanTask(ds, helper.chosenPath, helper.chosenRemained, outerJoinKeys, us, rangeInfo, true)
+		joins = append(joins, p.constructIndexMergeJoin(prop, outerIdx, innerTask2, helper.chosenRanges, keyOff2IdxOff, helper.chosenPath, helper.lastColManager)...)
+		return joins
 	}
 	return nil
 }
@@ -466,6 +527,7 @@ type indexJoinBuildHelper struct {
 	idxOff2KeyOff   []int
 	lastColManager  *ColWithCmpFuncManager
 	chosenRanges    []*ranger.Range
+	chosenPath      *accessPath
 
 	curPossibleUsedKeys []*expression.Column
 	curNotUsedIndexCols []*expression.Column
@@ -500,7 +562,7 @@ func (ijHelper *indexJoinBuildHelper) buildRangeDecidedByInformation(idxCols []*
 }
 
 // constructInnerTableScanTask is specially used to construct the inner plan for PhysicalIndexJoin.
-func (p *LogicalJoin) constructInnerTableScanTask(ds *DataSource, pk *expression.Column, outerJoinKeys []*expression.Column, us *LogicalUnionScan) task {
+func (p *LogicalJoin) constructInnerTableScanTask(ds *DataSource, pk *expression.Column, outerJoinKeys []*expression.Column, us *LogicalUnionScan, keepOrder bool) task {
 	ranges := ranger.FullIntRange(mysql.HasUnsignedFlag(pk.RetType.Flag))
 	ts := PhysicalTableScan{
 		Table:           ds.tableInfo,
@@ -511,6 +573,7 @@ func (p *LogicalJoin) constructInnerTableScanTask(ds *DataSource, pk *expression
 		Ranges:          ranges,
 		rangeDecidedBy:  outerJoinKeys,
 		StoreType:       kv.TiKV,
+		KeepOrder:       keepOrder,
 	}.Init(ds.ctx)
 	if ds.preferStoreType&preferTiFlash != 0 {
 		ts.StoreType = kv.TiFlash
@@ -533,6 +596,7 @@ func (p *LogicalJoin) constructInnerTableScanTask(ds *DataSource, pk *expression
 		indexPlanFinished: true,
 		cst:               scanFactor * rowSize * ts.stats.RowCount,
 		tblColHists:       ds.TblColHists,
+		keepOrder:         ts.KeepOrder,
 	}
 	selStats := ts.stats.Scale(selectionFactor)
 	ts.addPushedDownSelection(copTask, selStats)
@@ -557,22 +621,31 @@ func (p *LogicalJoin) constructInnerUnionScan(us *LogicalUnionScan, reader Physi
 }
 
 // constructInnerIndexScanTask is specially used to construct the inner plan for PhysicalIndexJoin.
-func (p *LogicalJoin) constructInnerIndexScanTask(ds *DataSource, idx *model.IndexInfo, filterConds []expression.Expression,
-	outerJoinKeys []*expression.Column, us *LogicalUnionScan, rangeInfo string) task {
+func (p *LogicalJoin) constructInnerIndexScanTask(
+	ds *DataSource,
+	path *accessPath,
+	filterConds []expression.Expression,
+	outerJoinKeys []*expression.Column,
+	us *LogicalUnionScan,
+	rangeInfo string,
+	keepOrder bool,
+) task {
 	is := PhysicalIndexScan{
 		Table:            ds.tableInfo,
 		TableAsName:      ds.TableAsName,
 		DBName:           ds.DBName,
 		Columns:          ds.Columns,
-		Index:            idx,
+		Index:            path.index,
+		IdxCols:          path.idxCols,
+		IdxColLens:       path.idxColLens,
 		dataSourceSchema: ds.schema,
-		KeepOrder:        false,
+		KeepOrder:        keepOrder,
 		Ranges:           ranger.FullRange(),
 		rangeInfo:        rangeInfo,
 	}.Init(ds.ctx)
 
 	var rowCount float64
-	idxHist, ok := ds.statisticTable.Indices[idx.ID]
+	idxHist, ok := ds.statisticTable.Indices[path.index.ID]
 	// TODO: we are assuming that:
 	// - rows are uniformly distributed among the distinct values;
 	// - every outer row can find matches in inner table;
@@ -591,18 +664,19 @@ func (p *LogicalJoin) constructInnerIndexScanTask(ds *DataSource, idx *model.Ind
 		indexPlan:   is,
 		tblColHists: ds.TblColHists,
 		tblCols:     ds.TblCols,
+		keepOrder:   is.KeepOrder,
 	}
-	if !isCoveringIndex(ds.schema.Columns, is.Index.Columns, is.Table.PKIsHandle) {
+	if !isCoveringIndex(ds.schema.Columns, path.fullIdxCols, path.fullIdxColLens, is.Table.PKIsHandle) {
 		// On this way, it's double read case.
 		ts := PhysicalTableScan{Columns: ds.Columns, Table: is.Table, TableAsName: ds.TableAsName}.Init(ds.ctx)
 		ts.SetSchema(is.dataSourceSchema)
 		cop.tablePlan = ts
 	}
-	is.initSchema(ds.id, idx, cop.tablePlan != nil)
-	rowSize := is.indexScanRowSize(idx, ds)
+	is.initSchema(ds.id, path.index, path.fullIdxCols, cop.tablePlan != nil)
+	rowSize := is.indexScanRowSize(path.index, ds)
 	cop.cst = rowCount * rowSize * scanFactor
-	indexConds, tblConds := splitIndexFilterConditions(filterConds, idx.Columns, ds.tableInfo)
-	path := &accessPath{
+	indexConds, tblConds := splitIndexFilterConditions(filterConds, path.fullIdxCols, path.fullIdxColLens, ds.tableInfo)
+	tmpPath := &accessPath{
 		indexFilters:     indexConds,
 		tableFilters:     tblConds,
 		countAfterAccess: rowCount,
@@ -614,11 +688,11 @@ func (p *LogicalJoin) constructInnerIndexScanTask(ds *DataSource, idx *model.Ind
 			logutil.BgLogger().Debug("calculate selectivity failed, use selection factor", zap.Error(err))
 			selectivity = selectionFactor
 		}
-		path.countAfterIndex = rowCount * selectivity
+		tmpPath.countAfterIndex = rowCount * selectivity
 	}
 	selectivity := ds.stats.RowCount / ds.tableStats.RowCount
 	finalStats := ds.stats.ScaleByExpectCnt(selectivity * rowCount)
-	is.addPushedDownSelection(cop, ds, path, finalStats)
+	is.addPushedDownSelection(cop, ds, tmpPath, finalStats)
 	t := finishCopTask(ds.ctx, cop).(*rootTask)
 	reader := t.p
 	t.p = p.constructInnerUnionScan(us, reader)
@@ -816,16 +890,15 @@ func (ijHelper *indexJoinBuildHelper) removeUselessEqAndInFunc(
 	return notKeyEqAndIn, nil
 }
 
-func (ijHelper *indexJoinBuildHelper) analyzeLookUpFilters(indexInfo *model.IndexInfo, innerPlan *DataSource, innerJoinKeys []*expression.Column) (emptyRange bool, err error) {
-	idxCols, colLengths := expression.IndexInfo2Cols(innerPlan.schema.Columns, indexInfo)
-	if len(idxCols) == 0 {
+func (ijHelper *indexJoinBuildHelper) analyzeLookUpFilters(path *accessPath, innerPlan *DataSource, innerJoinKeys []*expression.Column) (emptyRange bool, err error) {
+	if len(path.idxCols) == 0 {
 		return false, nil
 	}
-	accesses := make([]expression.Expression, 0, len(idxCols))
-	ijHelper.resetContextForIndex(innerJoinKeys, idxCols, colLengths)
+	accesses := make([]expression.Expression, 0, len(path.idxCols))
+	ijHelper.resetContextForIndex(innerJoinKeys, path.idxCols, path.idxColLens)
 	notKeyEqAndIn, remained, rangeFilterCandidates := ijHelper.findUsefulEqAndInFilters(innerPlan)
 	var remainedEqAndIn []expression.Expression
-	notKeyEqAndIn, remainedEqAndIn = ijHelper.removeUselessEqAndInFunc(idxCols, notKeyEqAndIn)
+	notKeyEqAndIn, remainedEqAndIn = ijHelper.removeUselessEqAndInFunc(path.idxCols, notKeyEqAndIn)
 	matchedKeyCnt := len(ijHelper.curPossibleUsedKeys)
 	// If no join key is matched while join keys actually are not empty. We don't choose index join for now.
 	if matchedKeyCnt <= 0 && len(innerJoinKeys) > 0 {
@@ -840,7 +913,7 @@ func (ijHelper *indexJoinBuildHelper) analyzeLookUpFilters(indexInfo *model.Inde
 		return false, nil
 	}
 	// If all the index columns are covered by eq/in conditions, we don't need to consider other conditions anymore.
-	if lastColPos == len(idxCols) {
+	if lastColPos == len(path.idxCols) {
 		// If there's join key matched index column. Then choose hash join is always a better idea.
 		// e.g. select * from t1, t2 where t2.a=1 and t2.b=1. And t2 has index(a, b).
 		//      If we don't have the following check, TiDB will build index join for this case.
@@ -855,13 +928,13 @@ func (ijHelper *indexJoinBuildHelper) analyzeLookUpFilters(indexInfo *model.Inde
 		if emptyRange {
 			return true, nil
 		}
-		ijHelper.updateBestChoice(ranges, indexInfo, accesses, remained, nil)
+		ijHelper.updateBestChoice(ranges, path, accesses, remained, nil)
 		return false, nil
 	}
-	lastPossibleCol := idxCols[lastColPos]
+	lastPossibleCol := path.idxCols[lastColPos]
 	lastColManager := &ColWithCmpFuncManager{
 		targetCol:         lastPossibleCol,
-		colLength:         colLengths[lastColPos],
+		colLength:         path.idxColLens[lastColPos],
 		affectedColSchema: expression.NewSchema(),
 	}
 	lastColAccess := ijHelper.buildLastColManager(lastPossibleCol, innerPlan, lastColManager)
@@ -877,7 +950,7 @@ func (ijHelper *indexJoinBuildHelper) analyzeLookUpFilters(indexInfo *model.Inde
 		var ranges, nextColRange []*ranger.Range
 		var err error
 		if len(colAccesses) > 0 {
-			nextColRange, err = ranger.BuildColumnRange(colAccesses, ijHelper.join.ctx.GetSessionVars().StmtCtx, lastPossibleCol.RetType, colLengths[lastColPos])
+			nextColRange, err = ranger.BuildColumnRange(colAccesses, ijHelper.join.ctx.GetSessionVars().StmtCtx, lastPossibleCol.RetType, path.idxColLens[lastColPos])
 			if err != nil {
 				return false, err
 			}
@@ -890,11 +963,11 @@ func (ijHelper *indexJoinBuildHelper) analyzeLookUpFilters(indexInfo *model.Inde
 			return true, nil
 		}
 		remained = append(remained, colRemained...)
-		if colLengths[lastColPos] != types.UnspecifiedLength {
+		if path.idxColLens[lastColPos] != types.UnspecifiedLength {
 			remained = append(remained, colAccesses...)
 		}
 		accesses = append(accesses, colAccesses...)
-		ijHelper.updateBestChoice(ranges, indexInfo, accesses, remained, nil)
+		ijHelper.updateBestChoice(ranges, path, accesses, remained, nil)
 		return false, nil
 	}
 	accesses = append(accesses, lastColAccess...)
@@ -906,17 +979,17 @@ func (ijHelper *indexJoinBuildHelper) analyzeLookUpFilters(indexInfo *model.Inde
 	if emptyRange {
 		return true, nil
 	}
-	ijHelper.updateBestChoice(ranges, indexInfo, accesses, remained, lastColManager)
+	ijHelper.updateBestChoice(ranges, path, accesses, remained, lastColManager)
 	return false, nil
 }
 
-func (ijHelper *indexJoinBuildHelper) updateBestChoice(ranges []*ranger.Range, idxInfo *model.IndexInfo, accesses,
+func (ijHelper *indexJoinBuildHelper) updateBestChoice(ranges []*ranger.Range, path *accessPath, accesses,
 	remained []expression.Expression, lastColManager *ColWithCmpFuncManager) {
 	// We choose the index by the number of used columns of the range, the much the better.
 	// Notice that there may be the cases like `t1.a=t2.a and b > 2 and b < 1`. So ranges can be nil though the conditions are valid.
 	// But obviously when the range is nil, we don't need index join.
 	if len(ranges) > 0 && len(ranges[0].LowVal) > ijHelper.maxUsedCols {
-		ijHelper.chosenIndexInfo = idxInfo
+		ijHelper.chosenPath = path
 		ijHelper.maxUsedCols = len(ranges[0].LowVal)
 		ijHelper.chosenRanges = ranges
 		ijHelper.chosenAccess = accesses
