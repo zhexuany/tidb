@@ -417,7 +417,8 @@ func CheckExprPushFlash(exprs []Expression) (exprPush, remain []Expression) {
 			case ast.Plus, ast.Minus, ast.Div, ast.Mul,
 				ast.NullEQ, ast.GE, ast.LE, ast.EQ, ast.NE,
 				ast.LT, ast.GT, ast.Ifnull, ast.IsNull, ast.Or,
-				ast.In, ast.Mod, ast.And:
+				ast.In, ast.Mod, ast.And, ast.LogicOr, ast.LogicAnd,
+				ast.Like, ast.UnaryNot:
 				if _, r := CheckExprPushFlash(x.GetArgs()); len(r) > 0 {
 					remain = append(remain, expr)
 				} else {
