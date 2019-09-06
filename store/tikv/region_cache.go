@@ -363,6 +363,14 @@ func (c *RegionCache) GetFlashRPCContext(bo *Backoffer, id RegionVerID) (*RPCCon
 		case deleted:
 			c.changeToActiveStore(cachedRegion, store, i)
 		}
+		storeFailEpoch := atomic.LoadUint32(&store.fail)
+		if storeFailEpoch != regionStore.storeFails[i] {
+			cachedRegion.invalidate()
+			logutil.BgLogger().Info("invalidate current region, because others failed on same store",
+				zap.Uint64("region", id.GetID()),
+				zap.String("store", store.addr))
+			continue
+		}
 
 		if store.sType != kv.TiFlash {
 			notFlashCnt++
@@ -371,7 +379,7 @@ func (c *RegionCache) GetFlashRPCContext(bo *Backoffer, id RegionVerID) (*RPCCon
 		if regionStore.storeFails[i] != atomic.LoadUint32(&store.fail) {
 			continue
 		}
-		peer, storeIdx := cachedRegion.meta.Peers[i], i
+		peer := cachedRegion.meta.Peers[i]
 		addr := store.addr
 		if store == nil || len(addr) == 0 {
 			cachedRegion.invalidate()
@@ -389,19 +397,11 @@ func (c *RegionCache) GetFlashRPCContext(bo *Backoffer, id RegionVerID) (*RPCCon
 		// This one will be changed in future.
 		addr = ipAndPort[0] + ":" + strconv.FormatInt(port+1, 10)
 
-		storeFailEpoch := atomic.LoadUint32(&store.fail)
-		if storeFailEpoch != regionStore.storeFails[storeIdx] {
-			cachedRegion.invalidate()
-			logutil.BgLogger().Info("invalidate current region, because others failed on same store",
-				zap.Uint64("region", id.GetID()),
-				zap.String("store", store.addr))
-			return nil, nil
-		}
 		return &RPCContext{
 			Region:  id,
 			Meta:    cachedRegion.meta,
 			Peer:    peer,
-			PeerIdx: storeIdx,
+			PeerIdx: i,
 			Store:   store,
 			Addr:    addr,
 		}, nil
