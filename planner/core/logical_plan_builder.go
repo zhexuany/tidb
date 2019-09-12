@@ -383,9 +383,12 @@ func (p *DataSource) setPreferredStoreType(hintInfo *tableHintInfo) {
 		return
 	}
 
-	alias := extractTableAlias(p)
+	alias := p.TableAsName
+	if alias == nil {
+		alias = &p.tableInfo.Name
+	}
 
-	if hintInfo.ifPreferFlash(alias) {
+	if hintInfo.ifPreferFlash(&hintTableInfo{name: *alias, selectOffset: p.SelectBlockOffset()}) {
 		p.preferStoreType |= preferTiFlash
 	}
 }
@@ -2358,7 +2361,6 @@ func (b *PlanBuilder) buildDataSource(ctx context.Context, tn *ast.TableName, as
 		partitionNames:      tn.PartitionNames,
 		TblCols:             make([]*expression.Column, 0, len(columns)),
 	}.Init(b.ctx, b.getSelectOffset())
-	ds.setPreferredStoreType(b.TableHints())
 
 	var handleCol *expression.Column
 	schema := expression.NewSchema(make([]*expression.Column, 0, len(columns))...)
@@ -2380,6 +2382,7 @@ func (b *PlanBuilder) buildDataSource(ctx context.Context, tn *ast.TableName, as
 		schema.Append(newCol)
 		ds.TblCols = append(ds.TblCols, newCol)
 	}
+	ds.setPreferredStoreType(b.TableHints())
 	// We append an extra handle column to the schema when "ds" is not a memory
 	// table e.g. table in the "INFORMATION_SCHEMA" database, and the handle
 	// column is not the primary key of "ds".
