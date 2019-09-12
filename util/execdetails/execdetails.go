@@ -260,32 +260,32 @@ type ReaderRuntimeStats struct {
 	copRespTime []time.Duration
 }
 
-// RecordOneCopTask record once cop response time to update maxcopRespTime
-func (rrs *ReaderRuntimeStats) RecordOneCopTask(t time.Duration) {
+// recordOneCopTask record once cop response time to update maxcopRespTime
+func (rrs *ReaderRuntimeStats) recordOneCopTask(t time.Duration) {
 	rrs.Lock()
 	defer rrs.Unlock()
 	rrs.copRespTime = append(rrs.copRespTime, t)
 }
 
 func (rrs *ReaderRuntimeStats) String() string {
+	size := len(rrs.copRespTime)
+	if size == 0 {
+		return ""
+	}
+	if size == 1 {
+		return fmt.Sprintf("rpc time:%v", rrs.copRespTime[0])
+	}
 	sort.Slice(rrs.copRespTime, func(i, j int) bool {
 		return rrs.copRespTime[i] < rrs.copRespTime[j]
 	})
-	s := "cop resp time "
-	size := len(rrs.copRespTime)
-	if size == 0 {
-		return s + "max:0ns, min:0ns, avg:0ns, p80:0ns, p95:0ns"
-	}
-	s += fmt.Sprintf("max:%v", rrs.copRespTime[size-1])
-	s += fmt.Sprintf(", min:%v", rrs.copRespTime[0])
+	vMax, vMin := rrs.copRespTime[size-1], rrs.copRespTime[0]
+	vP80, vP95 := rrs.copRespTime[size*4/5], rrs.copRespTime[size*19/20]
 	sum := 0.0
 	for _, t := range rrs.copRespTime {
 		sum += float64(t)
 	}
-	s += fmt.Sprintf(", avg:%v", time.Duration(sum/float64(size)))
-	s += fmt.Sprintf(", p80:%v", rrs.copRespTime[size*4/5])
-	s += fmt.Sprintf(", p95:%v", rrs.copRespTime[size*17/20])
-	return s
+	vAvg := time.Duration(sum / float64(size))
+	return fmt.Sprintf("rpc max:%v, min:%v, avg:%v, p80:%v, p95:%v", vMax, vMin, vAvg, vP80, vP95)
 }
 
 // RuntimeStatsColl collects executors's execution info.
@@ -345,7 +345,7 @@ func (e *RuntimeStatsColl) RecordOneCopTask(planID, address string, summary *tip
 // RecordOneReaderStats records a specific stats for TableReader, IndexReader and IndexLookupReader.
 func (e *RuntimeStatsColl) RecordOneReaderStats(planID string, copRespTime time.Duration) {
 	readerStats := e.GetReaderStats(planID)
-	readerStats.RecordOneCopTask(copRespTime)
+	readerStats.recordOneCopTask(copRespTime)
 }
 
 // ExistsRootStats checks if the planID exists in the rootStats collection.
