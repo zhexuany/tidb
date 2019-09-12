@@ -1989,13 +1989,11 @@ func (b *PlanBuilder) pushTableHints(hints []*ast.TableOptimizerHint, nodeType n
 		case HintHashAgg:
 			aggHints.preferAggType |= preferHashAgg
 		case HintStreamAgg:
-			preferAggType |= preferStreamAgg
+			aggHints.preferAggType |= preferStreamAgg
 		case ReadFromStorage:
 			if hint.StoreType.L == "tiflash" {
 				tiflashTables = tableNames2HintTableInfo(hint.Tables, b.hintProcessor, nodeType, currentLevel)
 			}
-		case HintIndex:
-			aggHints.preferAggType |= preferStreamAgg
 		case HintAggToCop:
 			aggHints.preferAggToCop = true
 		case HintUseIndex:
