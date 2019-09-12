@@ -632,6 +632,17 @@ func (e *Explain) explainPlanInRowFormat(p PhysicalPlan, taskType, indent string
 	case *PhysicalIndexLookUpReader:
 		e.explainPlanInRowFormat(copPlan.indexPlan, "cop[tikv]", childIndent, false)
 		e.explainPlanInRowFormat(copPlan.tablePlan, "cop[tikv]", childIndent, true)
+	case *PhysicalIndexMergeReader:
+		for i := 0; i < len(copPlan.partialPlans); i++ {
+			if copPlan.tablePlan == nil && i == len(copPlan.partialPlans)-1 {
+				e.explainPlanInRowFormat(copPlan.partialPlans[i], "cop[tikv]", childIndent, true)
+			} else {
+				e.explainPlanInRowFormat(copPlan.partialPlans[i], "cop[tikv]", childIndent, false)
+			}
+		}
+		if copPlan.tablePlan != nil {
+			e.explainPlanInRowFormat(copPlan.tablePlan, "cop[tikv]", childIndent, true)
+		}
 	}
 }
 
