@@ -73,6 +73,9 @@ max-batch-size=128
 [tiflash]
 label-key="zone"
 label-value="engine"
+[stmt-summary]
+max-stmt-count=1000
+max-sql-length=1024
 `)
 
 	c.Assert(err, IsNil)
@@ -95,6 +98,8 @@ label-value="engine"
 	c.Assert(conf.SplitRegionMaxNum, Equals, uint64(10000))
 	c.Assert(conf.TiFlash.LabelKey, Equals, "zone")
 	c.Assert(conf.TiFlash.LabelValue, Equals, "engine")
+	c.Assert(conf.StmtSummary.MaxStmtCount, Equals, uint(1000))
+	c.Assert(conf.StmtSummary.MaxSQLLength, Equals, uint(1024))
 	c.Assert(f.Close(), IsNil)
 	c.Assert(os.Remove(configFile), IsNil)
 
