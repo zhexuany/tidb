@@ -17,8 +17,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -385,17 +383,6 @@ func (c *RegionCache) GetFlashRPCContext(bo *Backoffer, id RegionVerID) (*RPCCon
 			cachedRegion.invalidate()
 			return nil, nil
 		}
-		ipAndPort := strings.Split(addr, ":")
-		if len(ipAndPort) != 2 {
-			return nil, nil
-		}
-		port, err := strconv.ParseInt(ipAndPort[1], 10, 32)
-		if err != nil {
-			return nil, err
-		}
-		// Flash storage's port is r_egine's port plus one.
-		// This one will be changed in future.
-		addr = ipAndPort[0] + ":" + strconv.FormatInt(port+1, 10)
 
 		return &RPCContext{
 			Region:  id,
