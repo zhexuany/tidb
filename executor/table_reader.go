@@ -80,7 +80,6 @@ type TableReaderExecutor struct {
 	corColInFilter bool
 	// corColInAccess tells whether there's correlated column in access conditions.
 	corColInAccess bool
-	storeType      kv.StoreType
 }
 
 // Open initialzes necessary variables for using this executor.

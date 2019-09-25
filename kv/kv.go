@@ -93,17 +93,6 @@ const (
 	ReplicaReadLearner
 )
 
-// StoreType reperents the type of one storage.
-type StoreType int8
-
-// Store types.
-const (
-	// TiKV means the storage is tikv.
-	TiKV StoreType = iota
-	// TiFlash means the storage is tiflash.
-	TiFlash
-)
-
 // IsFollowerRead checks if leader is going to be used to read data.
 func (r ReplicaReadType) IsFollowerRead() bool {
 	return r == ReplicaReadFollower
@@ -271,8 +260,6 @@ type Request struct {
 	// Streaming indicates using streaming API for this request, result in that one Next()
 	// call would not corresponds to a whole region result.
 	Streaming bool
-	// StoreType represents this request is sent to the which type of store.
-	StoreType StoreType
 	// ReplicaRead is used for reading data from replicas, only follower is supported at this time.
 	ReplicaRead ReplicaReadType
 	// StoreType represents this request is sent to the which type of store.
