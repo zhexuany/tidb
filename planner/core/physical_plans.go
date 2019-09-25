@@ -62,6 +62,7 @@ type PhysicalTableReader struct {
 	TablePlans []PhysicalPlan
 	tablePlan  PhysicalPlan
 
+	// StoreType indicates table read from which type of store.
 	StoreType kv.StoreType
 }
 

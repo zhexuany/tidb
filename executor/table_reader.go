@@ -75,6 +75,7 @@ type TableReaderExecutor struct {
 	keepOrder bool
 	desc      bool
 	streaming bool
+	storeType kv.StoreType
 	// corColInFilter tells whether there's correlated column in filter.
 	corColInFilter bool
 	// corColInAccess tells whether there's correlated column in access conditions.

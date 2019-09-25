@@ -232,6 +232,16 @@ const (
 	ReqSubTypeAnalyzeCol = 10005
 )
 
+// StoreType represents the type of a store.
+type StoreType uint8
+
+const (
+	// TiKV means the type of a store is TiKV.
+	TiKV StoreType = iota
+	// TiFlash means the type of a store is TiFlash.
+	TiFlash
+)
+
 // Request represents a kv request.
 type Request struct {
 	// Tp is the request type.
@@ -265,6 +275,8 @@ type Request struct {
 	StoreType StoreType
 	// ReplicaRead is used for reading data from replicas, only follower is supported at this time.
 	ReplicaRead ReplicaReadType
+	// StoreType represents this request is sent to the which type of store.
+	StoreType StoreType
 }
 
 // ResultSubset represents a result subset from a single storage unit.
