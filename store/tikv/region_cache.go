@@ -17,6 +17,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -380,6 +382,15 @@ func (c *RegionCache) GetTiFlashRPCContext(bo *Backoffer, id RegionVerID) (*RPCC
 				zap.String("store", store.addr))
 			return nil, nil
 		}
+		ipAndPort := strings.Split(addr, ":")
+		if len(ipAndPort) < 2 {
+			return nil, errors.Errorf("invalid TiFlash store address")
+		}
+		port, err := strconv.ParseInt(ipAndPort[1], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		addr = ipAndPort[0] + ":" + string(port+1)
 		return &RPCContext{
 			Region:  id,
 			Meta:    cachedRegion.meta,
