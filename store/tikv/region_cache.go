@@ -390,7 +390,7 @@ func (c *RegionCache) GetTiFlashRPCContext(bo *Backoffer, id RegionVerID) (*RPCC
 		if err != nil {
 			return nil, err
 		}
-		addr = ipAndPort[0] + ":" + string(port+1)
+		addr = ipAndPort[0] + ":" + strconv.FormatInt(port+1, 10)
 		return &RPCContext{
 			Region:  id,
 			Meta:    cachedRegion.meta,
