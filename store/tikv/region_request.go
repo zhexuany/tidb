@@ -95,12 +95,12 @@ func (s *RegionRequestSender) SendReqCtx(bo *Backoffer, req *tikvrpc.Request, re
 		}
 	})
 
-	var replicaRead kv.ReplicaReadType
-	if req.ReplicaRead {
-		replicaRead = kv.ReplicaReadFollower
-	} else {
-		replicaRead = kv.ReplicaReadLeader
-	}
+	//var replicaRead kv.ReplicaReadType
+	//if req.ReplicaRead {
+	//	replicaRead = kv.ReplicaReadFollower
+	//} else {
+	//	replicaRead = kv.ReplicaReadLeader
+	//}
 	for {
 		var ctx *RPCContext
 		var err error
