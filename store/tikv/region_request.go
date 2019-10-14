@@ -106,7 +106,8 @@ func (s *RegionRequestSender) SendReqCtx(bo *Backoffer, req *tikvrpc.Request, re
 		var err error
 		switch storeType {
 		case kv.TiKV:
-			ctx, err = s.regionCache.GetRPCContext(bo, regionID, replicaRead, req.ReplicaReadSeed)
+			ctx, err = s.regionCache.GetFlashRPCContext(bo, regionID)
+			//ctx, err = s.regionCache.GetRPCContext(bo, regionID, replicaRead, req.ReplicaReadSeed)
 		case kv.TiFlash:
 			ctx, err = s.regionCache.GetFlashRPCContext(bo, regionID)
 		default:
